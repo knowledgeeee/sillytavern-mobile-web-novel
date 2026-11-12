@@ -1,5 +1,13 @@
 # 手机联网与小说工坊
 
+## 安装链接
+
+- 在酒馆“扩展 → 安装扩展”填写：`https://github.com/knowledgeeee/sillytavern-mobile-web-novel`
+- 固定版本源码ZIP：[v1.0.1](https://github.com/knowledgeeee/sillytavern-mobile-web-novel/archive/refs/tags/v1.0.1.zip)
+- 配套角色卡：[character.json](https://raw.githubusercontent.com/knowledgeeee/sillytavern-mobile-web-novel/main/character.json)
+
+扩展安装完成并刷新后，可在面板点击“下载配套角色卡JSON”，再导入酒馆。公开网页读取已验证；无密钥搜索是尽力尝试，受站点限制时会返回明确警告。
+
 当前版本：1.0.1。已修复手机尺寸下面板/入口按钮被酒馆主题样式压缩或移出屏幕的问题，并包含扩展更新后的章节编号识别、旧目录缓存刷新及正文网址一致性校验。
 
 这是可安装到本地 SillyTavern 的纯前端扩展，包含模型网页工具与小说分章建档。使用酒馆现有网页接口，不需要另装服务器插件，不依赖电脑或Edge。
