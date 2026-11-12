@@ -1,0 +1,16 @@
+{
+  "display_name": "手机联网与小说工坊",
+  "loading_order": 110,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Local Novel Workshop",
+  "version": "1.0.1",
+  "auto_update": false,
+  "minimum_client_version": "1.19.0",
+  "generate_interceptor": "novelWorkshopMobileIntercept",
+  "hooks": {
+    "activate": "init"
+  }
+}

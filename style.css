@@ -1,0 +1,11 @@
+#nmw-toggle{position:fixed;right:18px;bottom:135px;z-index:1001;background:var(--SmartThemeBlurTintColor,#222);border:1px solid var(--SmartThemeBorderColor,#777);padding:9px 14px}
+.nmw-head #nmw-close{min-width:65px;white-space:nowrap;flex-shrink:0}
+#novel-workshop-mobile-panel{position:fixed;right:15px;top:55px;bottom:65px;width:min(580px,calc(100vw - 30px));overflow:auto;z-index:1010;border:1px solid var(--SmartThemeBorderColor,#888);border-radius:12px;background:var(--SmartThemeBlurTintColor,#25252b);backdrop-filter:blur(24px);padding:20px;box-shadow:0 12px 60px #0009;color:var(--SmartThemeBodyColor,#eee)}
+#novel-workshop-mobile-panel[hidden]{display:none}#novel-workshop-mobile-panel label{display:block;margin:8px 0;font-size:14px}#novel-workshop-mobile-panel input,#novel-workshop-mobile-panel select,#novel-workshop-mobile-panel textarea{width:100%;margin-top:5px}#novel-workshop-mobile-panel p{font-size:13px;opacity:.8;line-height:1.6}.nmw-head,.nmw-row{display:flex;gap:10px;align-items:center;justify-content:space-between}.nmw-row>label{flex:1;min-width:0}.nmw-row .menu_button{flex:1;white-space:normal}#nmw-status{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;font:14px/1.6 sans-serif;background:#0003;border-radius:7px;padding:12px}
+
+@media(max-width:600px){#novel-workshop-mobile-panel{top:45px;bottom:10px;padding:14px;right:5px;width:calc(100vw - 10px)}.nmw-row{flex-wrap:wrap}.nmw-row>label{flex-basis:45%}#novel-workshop-mobile-panel .menu_button{min-height:40px}.nmw-network{margin-top:16px}#nmw-toggle{right:8px;bottom:110px}}
+
+#novel-workshop-mobile-panel{box-sizing:border-box;height:calc(100dvh - 120px);max-height:calc(100dvh - 120px)}#nmw-toggle{width:auto;min-width:100px;height:42px;min-height:42px;max-height:42px;white-space:nowrap;line-height:1.2;top:auto;margin:0;transform:none;flex:none}@media(max-width:600px){#novel-workshop-mobile-panel{height:calc(100dvh - 55px);max-height:calc(100dvh - 55px)}}
+
+/* Some ST themes make the root a zero-height fixed-position containing block. */
+#nmw-toggle{top:calc(100dvh - 177px);bottom:auto}@media(max-width:600px){#nmw-toggle{top:calc(100dvh - 152px)}}
