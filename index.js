@@ -9,17 +9,21 @@ const api = mobileApi;
 
 function status(text) { if (panel) panel.querySelector('#nmw-status').textContent = text; }
 async function updateSettings(patch) { ctx().chatMetadata.novelWorkshopMobile = { ...settings(), ...patch }; await ctx().saveMetadata(); }
-function isCard() { return ctx().characters[ctx().characterId]?.name === CARD_NAME; }
-function checkChat() { if (ctx().characterId === undefined || ctx().characterId === null || ctx().groupId) throw new Error('请先打开“小说续写工坊·移动版”角色的单人聊天'); }
+function isCard() { return !ctx().groupId && (settings().enabled ?? (Boolean(settings().bookId) || ctx().characters[ctx().characterId]?.name === CARD_NAME)); }
+function novelContext() { return '【当前聊天的小说辅助模式，不改变现有角色身份】\n' + CARD.replace('你是“小说续写工坊”，', '你在当前聊天中协助小说阅读与续写，保持用户原有角色身份，') + '\n' + contextPacket(activeBook, settings()); }
+async function setEnabled(enabled) { checkChat(); await updateSettings({ enabled: Boolean(enabled) }); refreshPrompt(); if (panel) panel.querySelector('#nmw-enabled').checked = isCard(); }
+function checkChat() { if (ctx().groupId) throw new Error('当前仅支持单人或临时聊天，请先退出群聊'); }
 function refreshPrompt() {
-    ctx().setExtensionPrompt('novel-workshop-mobile', activeBook && isCard() ? contextPacket(activeBook, settings()) : '', 1, 1, false, 0);
+    if (panel?.querySelector('#nmw-enabled')) panel.querySelector('#nmw-enabled').checked = isCard();
+    ctx().setExtensionPrompt('novel-workshop-mobile', activeBook && isCard() ? novelContext() : '', 1, 1, false, 0);
 }
 async function restore() {
     activeBook = null;
-    if (settings().bookId && isCard()) {
+    if (settings().bookId && !ctx().groupId) {
         try { activeBook = await api(`/book/${settings().bookId}`); } catch (e) { status(e.message); }
     }
     refreshPrompt();
+    if (panel) panel.querySelector('#nmw-enabled').checked = isCard();
 }
 async function analyzeChapter(c, book) {
     if (c.summary?.startsWith('【证据档案v2】')) return c.summary;
@@ -47,7 +51,7 @@ async function merge(book, through) {
 }
 export async function importNovel(url, count = 6, options = {}) {
     checkChat();
-    if (!isCard()) throw new Error('请先选择“小说续写工坊·移动版”角色');
+    // Explicit reading enables novel mode only in the current chat.
     if (busy) throw new Error('正在读取，请等待或暂停');
     const owner = ctx().getCurrentChatId();
     busy = true; cancelled = false;
@@ -56,7 +60,7 @@ export async function importNovel(url, count = 6, options = {}) {
         const book = await api('/discover', { url, mode: options.mode || 'auto', selector: options.selector || '' });
         if (ctx().getCurrentChatId() !== owner) throw new Error('聊天已切换，请回到原聊天重新读取');
         activeBook = book;
-        await updateSettings({ bookId: book.id, pov: settings().pov || 'third' });
+        await updateSettings({ bookId: book.id, enabled: true, pov: settings().pov || 'third' });
         const limit = count === 'all' ? book.chapters.length : Math.min(book.chapters.length, Math.max(1, Number(count) || 6));
         if (book.chapters.slice(0, limit).some(c => c.summary && !c.summary.startsWith('【证据档案v2】'))) { book.bible = ''; book.bibleThrough = 0; }
         for (let i = 0; i < limit; i++) {
@@ -91,7 +95,9 @@ async function appendAssistant(text) {
 }
 async function offerScenes() {
     if (busy) throw new Error('请等待读取完成');
+    checkChat();
     if (!activeBook?.bible) throw new Error('请先读取并分析至少一章小说');
+    await setEnabled(true);
     busy = true;
     try {
         status('正在根据已读原著生成续写场景……');
@@ -116,7 +122,7 @@ export async function intercept(chat, _size, abort, type) {
         if (activeBook) {
             refreshPrompt();
             // coreChat is constructed before this interceptor; add the packet directly for this request.
-            chat.unshift({ is_user: false, is_system: true, name: '小说证据档案', mes: contextPacket(activeBook, settings()) + relevantNotes(activeBook, last?.mes), extra: {} });
+            chat.unshift({ is_user: false, is_system: true, name: '小说证据档案', mes: novelContext() + relevantNotes(activeBook, last?.mes), extra: {} });
             chat.push({ is_user: false, is_system: true, name: '本轮镜头约束', mes: TURN_RULES, extra: {} });
         }
     } catch (e) { abort(true); toastr.error(e.message, '小说未读取成功', { timeOut: 12000 }); }
@@ -125,8 +131,8 @@ function guarded(fn) { return async () => { try { await fn(); } catch (e) { stat
 export function init() {
     if (document.getElementById('novel-workshop-mobile-panel')) return;
     panel = document.createElement('section'); panel.id = 'novel-workshop-mobile-panel'; panel.hidden = true;
-    panel.innerHTML = `<div class="nmw-head"><strong>小说续写工坊·移动版</strong><button id="nmw-close" class="menu_button">关闭</button></div>
-<p>目录链接会自动读取前6章。可增加章节数或读取全书；每章会调用当前模型建立并校核档案，产生相应模型用量。建档时请保持酒馆标签在前台，后台休眠可能暂停任务。</p>
+    panel.innerHTML = `<div class="nmw-head"><strong>小说工坊 · 当前聊天</strong><button id="nmw-close" class="menu_button">关闭</button></div>
+<label><input id="nmw-enabled" type="checkbox" style="width:auto"> 为当前聊天启用小说模式（无需专用角色卡）</label><p>启用后，目录链接会自动读取前6章。可增加章节数或读取全书；每章会调用当前模型建立并校核档案，产生相应模型用量。建档时请保持酒馆标签在前台，后台休眠可能暂停任务。</p>
 <label>小说目录 / 单章网址<input id="nmw-url" class="text_pole" type="url" placeholder="https://…"></label>
 <div class="nmw-row"><label>累计读到第几章<input id="nmw-count" class="text_pole" type="number" value="6" min="1" max="15000"></label><label>联网方式<select id="nmw-mode" class="text_pole"><option value="http">酒馆内置网页接口（无需电脑）</option></select></label></div>
 <label>正文 CSS 选择器（通常留空；网站提取不准时填写）<input id="nmw-selector" class="text_pole" placeholder="#chaptercontent"></label>
@@ -135,22 +141,23 @@ export function init() {
 <div class="nmw-row"><label>叙述人称<select id="nmw-pov" class="text_pole"><option value="third">第三人称</option><option value="first">第一人称（我）</option></select></label><label>代入角色<input id="nmw-role" class="text_pole" placeholder="例如：孙悟空"></label></div>
 <label>自定义起点 / 场景<textarea id="nmw-scene" class="text_pole" rows="3" placeholder="例如：拜师前夜，独自听见山门外有人敲门"></textarea></label>
 <div class="nmw-row"><button id="nmw-save" class="menu_button">应用体验设置</button><button id="nmw-scenes" class="menu_button">生成可选续写场景</button><button id="nmw-export" class="menu_button">导出故事档案</button></div>
-<pre id="nmw-status">先选择“小说续写工坊·移动版”角色，再输入网址。第一次建议读6章检查正文与档案质量。</pre>`;
+<pre id="nmw-status">在任意单人聊天或临时聊天中输入网址，无需导入专用角色卡。第一次建议读6章检查正文与档案质量。</pre>`;
     document.body.append(panel);
     const button = document.createElement('button'); button.id = 'nmw-toggle'; button.textContent = '手机联网'; button.className = 'menu_button'; document.body.append(button);
     button.onclick = guarded(async () => { panel.hidden = !panel.hidden; if (!panel.hidden) { await library(); const s = settings(); panel.querySelector('#nmw-pov').value = s.pov || 'third'; panel.querySelector('#nmw-role').value = s.role || ''; panel.querySelector('#nmw-scene').value = s.scene || ''; if (activeBook) panel.querySelector('#nmw-url').value = activeBook.url; } });
     panel.querySelector('#nmw-close').onclick = () => panel.hidden = true;
+    panel.querySelector('#nmw-enabled').onchange = guarded(() => setEnabled(panel.querySelector('#nmw-enabled').checked));
     const options = () => ({ mode: panel.querySelector('#nmw-mode').value, selector: panel.querySelector('#nmw-selector').value });
     panel.querySelector('#nmw-read').onclick = guarded(() => importNovel(panel.querySelector('#nmw-url').value.trim(), panel.querySelector('#nmw-count').value, options()));
     panel.querySelector('#nmw-all').onclick = guarded(async () => { if (confirm('将逐章读取全书并调用当前模型建档。长篇小说可能耗时较长并产生较多模型用量；可随时暂停、以后继续。是否开始？')) await importNovel(panel.querySelector('#nmw-url').value.trim(), 'all', options()); });
     panel.querySelector('#nmw-cancel').onclick = () => { cancelled = true; status('将在当前网络/模型请求完成后暂停，已完成的档案会保留。'); };
-    panel.querySelector('#nmw-library').onchange = guarded(async () => { checkChat(); if (!isCard()) throw new Error('请先选择工坊角色'); if (busy) throw new Error('请先暂停读取'); const id = panel.querySelector('#nmw-library').value; if (!id) return; activeBook = await api(`/book/${id}`); await updateSettings({ bookId: id }); panel.querySelector('#nmw-url').value = activeBook.url; refreshPrompt(); status(`已载入《${activeBook.title}》，档案覆盖前${activeBook.bibleThrough}章。`); });
+    panel.querySelector('#nmw-library').onchange = guarded(async () => { checkChat(); if (busy) throw new Error('请先暂停读取'); const id = panel.querySelector('#nmw-library').value; if (!id) return; activeBook = await api(`/book/${id}`); await updateSettings({ bookId: id, enabled: true }); panel.querySelector('#nmw-url').value = activeBook.url; refreshPrompt(); status(`已载入《${activeBook.title}》，档案覆盖前${activeBook.bibleThrough}章。`); });
     panel.querySelector('#nmw-save').onclick = guarded(async () => { checkChat(); await updateSettings({ pov: panel.querySelector('#nmw-pov').value, role: panel.querySelector('#nmw-role').value.trim(), scene: panel.querySelector('#nmw-scene').value.trim() }); refreshPrompt(); status('体验设置已应用到当前聊天。'); });
     panel.querySelector('#nmw-scenes').onclick = guarded(offerScenes);
     panel.querySelector('#nmw-export').onclick = guarded(async () => { if (!activeBook) throw new Error('尚未载入小说'); const a = document.createElement('a'); const u = URL.createObjectURL(new Blob([JSON.stringify(activeBook, null, 2)], { type: 'application/json' })); a.href = u; a.download = `${activeBook.title.replace(/[\\/:*?"<>|]/g, '_')}-故事档案.json`; a.click(); setTimeout(() => URL.revokeObjectURL(u), 1000); });
     globalThis.novelWorkshopMobileIntercept = intercept;
     ctx().eventSource.on(ctx().eventTypes.CHAT_CHANGED, restore);
-    globalThis.NovelWorkshopMobile = { importNovel, offerScenes, api, restore, getBook: () => activeBook, getSettings: settings, setSettings: async patch => { await updateSettings(patch); refreshPrompt(); }, isBusy: () => busy };
+    globalThis.NovelWorkshopMobile = { importNovel, offerScenes, api, restore, getBook: () => activeBook, getSettings: settings, setEnabled, isEnabled: isCard, setSettings: async patch => { await updateSettings(patch); refreshPrompt(); }, isBusy: () => busy };
     setupMobilePanel();
     restore();
 }
