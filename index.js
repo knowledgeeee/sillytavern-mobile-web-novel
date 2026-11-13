@@ -1,4 +1,4 @@
-import { CATEGORIES, EXTRACT_SYSTEM, VERIFY_ARCHIVE_SYSTEM, parseArchive, validArchive, compileWorldbook, coverage, availableThrough, missingChapters, chapterRanges, cutoff, outline, worldContext, exportWorldbook } from './worldbook.js';
+import { CATEGORIES, EXTRACT_SYSTEM, VERIFY_ARCHIVE_SYSTEM, parseArchive, validArchive, compileWorldbook, coverage, availableThrough, extractionBudget, missingChapters, chapterRanges, cutoff, outline, worldContext, exportWorldbook } from './worldbook.js';
 import { mobileApi, setupMobilePanel } from './network.js';
 import { CARD_NAME, CARD, ARCHIVE_SYSTEM, VERIFY_SYSTEM, MERGE_SYSTEM, contextPacket, relevantNotes, TURN_RULES } from './prompts.js';
 const ctx = () => SillyTavern.getContext();
@@ -32,11 +32,12 @@ async function analyzeChapter(c, book, force = false) {
     if (validArchive(c.archive) && !force) return c.summary;
     const parts = [];
     const knownNames = compileWorldbook(book).filter(e => e.category === 'characters').map(e => [e.name, ...e.aliases].join('/')).slice(-70).join('；');
+    const plan = extractionBudget(book, c.text, settings().worldbookChars);
     for (let offset = 0; offset < c.text.length; offset += 6000) {
         if (cancelled) throw new Error('已暂停，未处理的原文保留，可继续建档');
         const source = c.text.slice(offset, offset + 6000);
         const priorStyle = compileWorldbook(book).filter(e => e.category === 'style').flatMap(e => e.facts.map(f => f.text)).join('；').slice(0, 180);
-        const label = `书名：${book.title}；来源：第${c.index + 1}章《${c.title}》，第${offset / 6000 + 1}/${Math.ceil(c.text.length / 6000)}段。已知人物名（仅用于统一名称）：${knownNames || '无'}。已记录文风：${priorStyle || '无，请首次建档保留一条整体文风概括'}。避免重复已知设定，重点写本段的关键变化。`;
+        const label = `书名：${book.title}；目录共${book.chapters.length}章；来源：第${c.index + 1}章《${c.title}》，第${offset / 6000 + 1}/${Math.ceil(c.text.length / 6000)}段。本段概括目标约${plan.chars}汉字，最多${plan.facts}条要点；这是篇幅分配而非凑字要求。已知人物名（仅用于统一名称）：${knownNames || '无'}。已记录文风：${priorStyle || '无，请首次建档保留一条整体文风概括'}。避免重复已知设定，重点写本段的关键变化。`;
         const budget = Math.min(16000, Math.max(2400, Number(settings().archiveTokens) || 5000));
         const answer = await ctx().generateRaw({ systemPrompt: EXTRACT_SYSTEM, prompt: `${label}\n<正文资料>\n${source}\n</正文资料>`, responseLength: budget });
         let candidate;
@@ -116,6 +117,7 @@ function setupWorldbookPanel() {
 <label><input id="nmw-keep-raw" type="checkbox" style="width:auto"> 建档后保留原文（取消后，仅成功且无异常的章节可精简）</label>
 <div class="nmw-row"><button id="nmw-world-settings" class="menu_button">应用建档设置</button><button id="nmw-world-preview" class="menu_button">查看世界书</button><button id="nmw-world-export" class="menu_button">导出酒馆世界书</button><button id="nmw-prune" class="menu_button">清理已建档原文</button></div>
 <div class="nmw-row"><button id="nmw-pending" class="menu_button">查看章节概括/异常</button><button id="nmw-retry" class="menu_button">重试待处理章节</button></div>
+<button id="nmw-rebuild" class="menu_button">按当前篇幅重建已有概括（额外用量）</button>
 <div class="nmw-row"><button id="nmw-review" class="menu_button">校核上一条回复（额外模型用量）</button><button id="nmw-review-undo" class="menu_button">撤销上次校核</button></div>
 <pre id="nmw-world-preview-text" hidden style="max-height:350px;overflow:auto;white-space:pre-wrap"></pre>`;
     panel.querySelector('#nmw-status').before(box);
@@ -133,6 +135,12 @@ function setupWorldbookPanel() {
     panel.querySelector('#nmw-world-export').onclick = guarded(async () => { const data = downloadWorldbook(); status(`已导出标准酒馆世界书，共${Object.keys(data.entries).length}个条目；在世界书面板导入即可编辑和绑定。扩展小说模式已注入相同资料，建议关闭小说模式后再绑定，避免重复。导出受故事进度上限约束。`); });
     panel.querySelector('#nmw-pending').onclick = guarded(async () => { if (!activeBook) throw new Error('尚未载入小说'); const p = panel.querySelector('#nmw-world-preview-text'); p.hidden = false; p.textContent = activeBook.chapters.filter(c => c.summary || c.lastError || c.archiveWarnings?.length).map(c => `第${c.index + 1}章《${c.title}》\n${c.lastError ? '待处理：' + c.lastError : c.summary}\n${c.archiveWarnings?.join('；') || ''}`).join('\n\n') || '尚未概括任何章节'; });
     panel.querySelector('#nmw-retry').onclick = guarded(async () => { if (!activeBook) throw new Error('尚未载入小说'); await importNovel(activeBook.url, panel.querySelector('#nmw-count').value || 6, { retryWarnings: true, selector: panel.querySelector('#nmw-selector').value.trim() }); });
+    panel.querySelector('#nmw-rebuild').onclick = guarded(async () => {
+        if (busy) throw new Error('请等待当前任务完成'); if (!activeBook) throw new Error('尚未载入小说');
+        const count = panel.querySelector('#nmw-count').value || 6;
+        if (!confirm(`将按已应用的目标篇幅重新概括累计前${count}章，产生额外模型用量；成功后替换旧概括，失败保留旧结果并继续。原文已删除时尝试重新下载；TXT请先重新导入原文件以补回原文。是否开始？`)) return;
+        await importNovel(activeBook.url, count, { rebuild: true, selector: panel.querySelector('#nmw-selector').value.trim() });
+    });
     panel.querySelector('#nmw-review').onclick = guarded(() => reviewLastReply());
     panel.querySelector('#nmw-review-undo').onclick = guarded(() => reviewLastReply(true));
     panel.querySelector('#nmw-prune').onclick = guarded(async () => {
@@ -168,11 +176,11 @@ export async function importNovel(url, count = 6, options = {}) {
             if (cancelled) throw new Error('已暂停，已完成的概括保留');
             if (ctx().getCurrentChatId() !== owner) throw new Error('聊天已切换，任务已暂停');
             const entry = book.chapters[i];
-            if (validArchive(entry.archive) && !(options.retryWarnings && entry.archiveWarnings?.length)) continue;
+            if (validArchive(entry.archive) && !options.rebuild && !(options.retryWarnings && entry.archiveWarnings?.length)) continue;
             try {
                 status(`正在概括 ${i + 1}/${limit}：${entry.title}${failed.length ? `；已有${failed.length}章待处理，任务继续` : ''}`);
                 const chapter = await api('/chapter', { id: book.id, index: i, mode: options.mode, selector: options.selector });
-                const summary = await analyzeChapter(chapter, book, Boolean(options.retryWarnings));
+                const summary = await analyzeChapter(chapter, book, Boolean(options.retryWarnings || options.rebuild));
                 Object.assign(entry, { summary, chars: chapter.text.length, method: chapter.method, lastError: '' });
                 if (entry.archiveWarnings?.length) notices.push(i + 1);
                 await wait(150);
@@ -186,7 +194,7 @@ export async function importNovel(url, count = 6, options = {}) {
         }
         await merge(book, limit); refreshPrompt(); await library();
         const gaps = missingChapters(book, limit);
-        status(`本轮处理完成：《${book.title}》已概括${book.chapters.filter(c => validArchive(c.archive)).length}/${book.chapters.length}章。${gaps.length ? `未纳入概括：第${chapterRanges(gaps)}章；已跳过，原文保留，可手动重试，成功章节不会重复调用模型。` : '可查看精简世界书。'}${notices.length ? ` 第${chapterRanges(notices)}章有少量无效条目被略过，原文保留，可重试异常章节。` : ''}`);
+        status(`本轮处理完成：《${book.title}》已概括${book.chapters.filter(c => validArchive(c.archive)).length}/${book.chapters.length}章。${gaps.length ? `未纳入概括：第${chapterRanges(gaps)}章；已跳过，原文保留，可手动重试，成功章节不会重复调用模型。` : '可查看完整世界书。'}${options.rebuild && failed.length ? ` 第${chapterRanges(failed)}章本次未更新，若有旧概括则继续保留。` : ''}${notices.length ? ` 第${chapterRanges(notices)}章有少量无效条目被略过，原文保留，可重试异常章节。` : ''}`);
         return book;
     } catch (error) { status(`任务暂停：${error.message}；已完成内容保留。`); refreshPrompt(); throw error; }
     finally { busy = false; }

@@ -7,7 +7,7 @@ export const EXTRACT_SYSTEM = `你是精简小说摘要编辑。只概括本段�
 category只能是characters、relationships、events、timeline、world、threads、style。不是证据摘抄库，不要evidence、引文、长对白、动作流水账或具体身体描写。用自己的话概括。
 优先级：①改变后续走向的关键事件及简短因果；②主要人物的性格/目标与重要经历时间线；③影响剧情的关系变化和持续后果；④关键世界规则、重大秘密；⑤整体文风（视角、语气、节奏、对白特点）。关键期限、持续伤势、物品去向与人物所知必须保留，不能为压缩而丢掉限制条件。无变化的性格和设定不反复记，倒水、抬头、触摸、重复对话等短暂动作不记。时间线写在对应人物的“轨迹”中；故事日期不明时写相对顺序，不把章节号当作剧情时间。
 亲密关系只用非露骨文字概括伴侣/信任/权力关系、同意与边界、关系转折及其持续剧情后果。不记录性行为过程、身体部位细节或色情词汇，文风只提炼抽象语言特征。对于不确定或人物不知道的事，保留“推测/未知”，不把猜测坐实。
-每6000字材料合计最多8条facts、最多6个entries，每个text尽量20至55字，最多90字。整段概括目标150至350汉字。不是每段都凑齐七类；只有明显的新信息才写。别名只写同一对象的明确别名，关系涉及的人名可以作为关系条目的aliases。JSON必须闭合。`;
+每个text尽量20至70字，最多90字；本段总篇幅及要点数按请求标签中的目标分配，不是所有小说都压成同样短的摘要。不是每段都凑齐七类；只记对理解全书有用的信息，原文较短/信息少时更短，不为字数凑写。别名只写同一对象的明确别名，关系涉及的人名可以作为关系条目的aliases。JSON必须闭合。`;
 export const VERIFY_ARCHIVE_SYSTEM = EXTRACT_SYSTEM + '\n本轮对照正文校核候选摘要，修正人物归因、时间、所知和持续后果；删掉重复、细枝末节及无依据的内容。保持精简，不补原文引证，不为了没有evidence字段而拒绝概括。';
 
 export function parseArchive(answer, source, verifyEvidence = true, version = 4) {
@@ -48,6 +48,14 @@ export function coverage(book) {
     let count = 0; for (const c of book.chapters) { if (!validArchive(c.archive)) break; count++; } return count;
 }
 export function availableThrough(book) { return book?.chapters.reduce((last, c, i) => validArchive(c.archive) ? i + 1 : last, 0) || 0; }
+export function extractionBudget(book, text, targetChars = 15000) {
+    const target = Math.min(20000, Math.max(10000, Number(targetChars) || 15000));
+    const parts = Math.max(1, Math.ceil(text.length / 6000));
+    // Leave room for later deduplication: fewer long chapters need richer chapter summaries.
+    const perChapter = Math.min(40000, Math.max(150, Math.ceil(target * 1.8 / Math.max(1, book.chapters.length))));
+    const chars = Math.round(Math.min(1200, Math.max(120, perChapter / parts), Math.max(120, text.length * 0.75 / parts)));
+    return { chars, facts: Math.min(30, Math.max(6, Math.ceil(chars / 40))) };
+}
 export function missingChapters(book, through = availableThrough(book)) { return book.chapters.slice(0, through).filter(c => !validArchive(c.archive)).map(c => c.index + 1); }
 export function chapterRanges(indices) {
     const values = [...new Set(indices)].sort((a, b) => a - b), ranges = [];
