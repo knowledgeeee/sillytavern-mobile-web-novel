@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 // Browser-only: uses the existing SillyTavern /api/search/visit route. No custom server plugin.
+import { parseArchive, validArchive, chapterSummary, coverage, outline } from './worldbook.js';
 const context = () => globalThis.SillyTavern.getContext();
 const MAX_BYTES = 6 * 1024 * 1024;
 const clean = value => String(value ?? '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -18,6 +19,14 @@ const chapterLabel = text => {
         '^(?:序章|楔子|引子|前言|后记|尾声|终章|番外)(?:\\s*[：:、．-].*)?$',
     ].join('|'), 'i').test(label);
 };
+// Titles need not contain chapter numbers. Accept unnamed serials only when the
+// target URL belongs to this very book, rather than loosening the text regex globally.
+function sameBookChapter(target, source) {
+    const base = source.pathname.replace(/(?:catalog|mulu)(?:\/.*)?$/i, '').replace(/(?:index|list)\.(?:html?|shtml)$/i, '');
+    if (/\/(?:book|wapbook|read|xs)\/[^/]+\//i.test(base) && target.pathname.startsWith(base) && /^\d+(?:_\d+)?\.(?:html?|shtml)$/i.test(target.pathname.slice(base.length))) return true;
+    const info = source.pathname.match(/^\/info_([^/]+)\/?$/i);
+    return Boolean(info && new RegExp(`^/read_${info[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[^/]+\\.html?$`, 'i').test(target.pathname));
+}
 const noise = /^(上一[章节页回]|下一[章节页回]|返回|加入书签|加入书架|投推荐票|最新网址|手机阅读|请记住本站|点击下一页|本章未完)/;
 const paused = new Set();
 const pageCache = new Map();
@@ -46,30 +55,34 @@ export function parseHtml(html, url, selector = '') {
     const searchQuery = doc.querySelector('input[name="q"],#sb_form_q')?.getAttribute('value') || '';
     doc.querySelectorAll('script,style,noscript,iframe,form,nav,footer,header,aside,.ads,.advertisement,.mw-editsection,.noprint,.printfooter,.catlinks,.reflist,.references').forEach(e => e.remove());
     const title = clean(doc.querySelector('meta[property="og:novel:book_name"]')?.content || doc.querySelector('h1')?.textContent || doc.title);
-    let scopes = [...doc.querySelectorAll('#list,.listmain,.chapter-list,.book-list,.book_list,.volume-list,.catalog,.catalog-list,.catalogue,.chapters,.info_chapters ul')];
+    const source = new URL(url);
+    const eligible = a => {
+        try { const target = new URL(a.getAttribute('href'), url), label = clean(a.textContent); return label && target.origin === source.origin && !target.hash && target.href !== source.href && !noise.test(label) && (chapterLabel(label) || sameBookChapter(target, source)); } catch { return false; }
+    };
+    let scopes = [...doc.querySelectorAll('#list,.listmain,.chapter-list,.book-list,.book_list,.volume-list,.catalog,.catalog-list,.catalogue,.chapters,.chapter,.BCsectionTwo-top,.info_chapters ul')];
     // Some sites show a short "latest chapters" list before the complete catalogue.
     // In the known info_chapters structure, the longest list is the complete one.
-    const infoLists = [...doc.querySelectorAll('.info_chapters ul')].map(el => ({ el, n: [...el.querySelectorAll('a[href]')].filter(a => chapterLabel(clean(a.textContent))).length }));
+    const infoLists = [...doc.querySelectorAll('.info_chapters ul')].map(el => ({ el, n: [...el.querySelectorAll('a[href]')].filter(eligible).length }));
     if (infoLists.length) {
         const complete = infoLists.sort((a, b) => b.n - a.n)[0];
         if (complete.n > 1) scopes = [complete.el];
     }
     if (!scopes.length) {
-        const lists = [...doc.querySelectorAll('dl')].map(el => ({ el, n: [...el.querySelectorAll('a[href]')].filter(a => chapterLabel(clean(a.textContent))).length })).filter(x => x.n > 1).sort((a, b) => b.n - a.n);
+        const lists = [...doc.querySelectorAll('dl')].map(el => ({ el, n: [...el.querySelectorAll('a[href]')].filter(eligible).length })).filter(x => x.n > 1).sort((a, b) => b.n - a.n);
         if (lists.length && (lists.length === 1 || lists[0].n >= lists[1].n * 3)) scopes = [lists[0].el];
     }
     let links = scopes.flatMap(e => [...e.querySelectorAll('a[href]')]);
-    if (links.filter(a => chapterLabel(clean(a.textContent))).length < 2) links = [...doc.querySelectorAll('a[href]')];
+    if (links.filter(eligible).length < 2) links = [...doc.querySelectorAll('a[href]')];
     const chapters = new Map();
     for (const a of links) {
         const label = clean(a.textContent);
         try {
             const target = new URL(a.getAttribute('href'), url);
-            if (target.origin === new URL(url).origin && !target.hash && target.href !== url && chapterLabel(label) && !noise.test(label)) chapters.set(target.href, { title: label, url: target.href });
+            if (eligible(a) && !chapters.has(target.href)) chapters.set(target.href, { title: label, url: target.href });
         } catch { }
     }
     let nodes;
-    try { nodes = [...doc.querySelectorAll(selector || '#chaptercontent,#chapter-content,#chapter_content,#content,.read-content,.chapter-content,.chapter_content,.txtnav,.contentbox,.mw-parser-output,article,main')]; }
+    try { nodes = [...doc.querySelectorAll(selector || '#chaptercontent,#chapter-content,#chapter_content,#content,#novelcontent,#C0NTENT,#nr1,.nr_nr,.read-content,.chapter-content,.chapter_content,.txtnav,.contentbox,.mw-parser-output,article,main')]; }
     catch { throw new Error('正文 CSS 选择器格式不正确'); }
     if (selector && !nodes.length) throw new Error('该选择器没有匹配到正文');
     if (!nodes.length) nodes = [doc.body];
@@ -99,16 +112,40 @@ export function parseHtml(html, url, selector = '') {
             return { title: clean(a.textContent), url: publicUrl(target.href), snippet: clean(item.querySelector('.b_caption p,p')?.textContent).slice(0, 500) };
         } catch { return null; }
     }).filter(Boolean).slice(0, 8);
-    return { title, url, text, chapters: [...chapters.values()], nextPage, searchResults, searchQuery, method: '酒馆内置网页接口' };
+    const catalogPage = /\/(?:catalog|mulu)(?:\/|$)|\/wapbook\/[^.]*\/?$|\/info_[^/]+\/?$/i.test(source.pathname) || /章节目录|全部章节|完整目录/.test(doc.querySelector('h1,h2')?.textContent || doc.title);
+    return { title, url, text, chapters: [...chapters.values()], nextPage, catalogPage, searchResults, searchQuery, method: '酒馆内置网页接口' };
+}
+
+// Mobile browsers can keep an old page open while the Tavern session is renewed
+// elsewhere.  The next POST then fails CSRF validation before it ever reaches the
+// web reader.  Refresh the token for the current cookie session and retry once.
+async function tavernFetch(path, init = {}) {
+    const request = { ...init, credentials: 'same-origin' };
+    let response = await fetch(path, request);
+    if (response.status !== 403) return response;
+
+    try {
+        const tokenResponse = await fetch('/csrf-token', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+        const tokenData = tokenResponse.ok ? await tokenResponse.json() : null;
+        if (!tokenData?.token) return response;
+        const headers = new Headers(init.headers || context().getRequestHeaders());
+        headers.set('X-CSRF-Token', tokenData.token);
+        response = await fetch(path, { ...request, headers });
+    } catch { /* Preserve the original response so the caller can show a useful error. */ }
+    return response;
 }
 
 export async function readWeb(raw, selector = '', refresh = false) {
     const url = publicUrl(raw); const key = `${url}\n${selector}`;
     if (!refresh && pageCache.has(key) && Date.now() - pageCache.get(key).at < 300000) return pageCache.get(key).page;
-    const response = await fetch('/api/search/visit', { method: 'POST', headers: context().getRequestHeaders(), body: JSON.stringify({ url, html: false }), signal: AbortSignal.timeout(45000) });
+    const requestPage = () => tavernFetch('/api/search/visit', { method: 'POST', headers: context().getRequestHeaders(), body: JSON.stringify({ url, html: false }), signal: AbortSignal.timeout(45000) });
+    let response = await requestPage();
+    // A failed public GET may be a transient upstream/TLS error. Retry only once;
+    // do not retry authentication, rate-limit or other access-control responses.
+    if ([500, 502, 503, 504].includes(response.status)) { await new Promise(resolve => setTimeout(resolve, 3000)); response = await requestPage(); }
     if (!response.ok) {
-        const reason = response.status === 404 ? '此酒馆版本缺少 /api/search/visit，请升级酒馆' : `读取失败（HTTP ${response.status}），网站可能限制访问或需要登录`;
-        throw new Error(`${reason}。本扩展不会继承手机浏览器对小说网站的登录态；可使用TXT正文导入。`);
+        const reason = response.status === 404 ? '此酒馆版本缺少 /api/search/visit，请升级酒馆' : response.status === 403 ? '酒馆会话已失效；扩展已自动刷新令牌仍未恢复，请刷新手机浏览器页面后重试' : `读取失败（HTTP ${response.status}），网站可能限制访问或需要登录`;
+        throw new Error(`${reason}（${url}）。本扩展不会继承手机浏览器对小说网站的登录态；可使用TXT正文导入。`);
     }
     const type = response.headers.get('content-type') || '';
     if (!/text\/|xhtml/i.test(type)) throw new Error('返回内容不是文字网页');
@@ -144,14 +181,15 @@ async function loadBook(id) {
     const db = await database(), handle = await owner();
     return new Promise((resolve, reject) => { const request = db.transaction('books').objectStore('books').get(`${handle}:${id}`); request.onsuccess = () => request.result ? resolve(request.result.book) : reject(new Error('本地书库中没有这本书')); request.onerror = () => reject(request.error); });
 }
-async function saveBook(book) {
+async function saveBook(book, prune = []) {
     const db = await database(), handle = await owner();
     const metadata = { ...book, chapters: book.chapters.map(({ text, ...c }) => ({ ...c, chars: text?.length || c.chars || 0 })) };
     return new Promise((resolve, reject) => {
         const tx = db.transaction('books', 'readwrite'), store = tx.objectStore('books');
         store.put({ key: `${handle}:${book.id}`, owner: handle, book: metadata });
         // Store source chapters separately, so every summary save does not rewrite a whole long novel.
-        for (const c of book.chapters) if (c.text) store.put({ key: `${handle}:${book.id}:chapter:${c.index}`, owner: handle, url: c.url, text: c.text });
+        for (const c of book.chapters) if (c.text && !prune.includes(c.index)) store.put({ key: `${handle}:${book.id}:chapter:${c.index}`, owner: handle, url: c.url, text: c.text });
+        for (const index of prune) store.delete(`${handle}:${book.id}:chapter:${index}`);
         tx.oncomplete = resolve; tx.onerror = () => reject(new Error('书库保存失败，可能是浏览器存储空间不足')); tx.onabort = tx.onerror;
     });
 }
@@ -170,7 +208,7 @@ export async function importText(text, title = '导入小说') {
     const id = await idFor(text), url = `local-text:${id}`;
     const marks = [...text.matchAll(/^\s*(第[零〇一二三四五六七八九十百千万两\d]+[章回节卷集][^\r\n]{0,90})\s*$/gm)];
     const chapters = marks.length > 1 ? marks.map((m, i) => ({ title: m[1], text: text.slice(m.index, marks[i + 1]?.index ?? text.length).trim() })) : [{ title, text }];
-    const book = { id: await idFor(url), url, title, created: new Date().toISOString(), bible: '', bibleThrough: 0, chapters: chapters.map((c, index) => ({ ...c, index, url: `${url}#${index}`, method: '用户导入TXT', summary: '' })) };
+    const book = { id: await idFor(url), url, title, keepRaw: false, created: new Date().toISOString(), bible: '', bibleThrough: 0, chapters: chapters.map((c, index) => ({ ...c, index, url: `${url}#${index}`, method: '用户导入TXT', summary: '' })) };
     try { return view(await loadBook(book.id)); } catch { await saveBook(book); return view(book); }
 }
 export async function mobileApi(route, body) {
@@ -181,18 +219,20 @@ export async function mobileApi(route, body) {
         let cached;
         try {
             cached = await loadBook(id);
+            if (url.startsWith('local-text:')) return view(cached);
             // Older parser versions could save a catalogue page itself as the only "chapter".
             // Refresh only that unmistakable fallback record; preserve genuine one-chapter books.
             const staleCatalogFallback = cached.chapters.length === 1 && cached.chapters[0]?.url === url && cached.chapters[0]?.title === cached.title;
-            if (!staleCatalogFallback) return view(cached);
+            if (!staleCatalogFallback && !body.refresh) return view(cached);
         } catch (e) { if (url.startsWith('local-text:')) throw e; }
         const page = await readWeb(url, body.selector || '');
-        const chapters = page.chapters.length > 1 ? page.chapters : [{ title: page.title, url }];
+        if (page.catalogPage && !page.chapters.length) throw new Error('目录页未识别到有效章节列表，未将目录冒充一章正文；请用“预览目录”检查或导入TXT');
+        const chapters = page.chapters.length ? page.chapters : [{ title: page.title, url }];
         if (chapters.length > 15000) throw new Error('目录过大，请使用分卷目录');
         const canReuseArchive = cached?.chapters.length === chapters.length && chapters.every((c, index) => cached.chapters[index]?.url === c.url);
-        const book = { id, url, title: page.title, selector: body.selector || '', created: cached?.created || new Date().toISOString(), bible: canReuseArchive ? cached.bible : '', bibleThrough: canReuseArchive ? cached.bibleThrough : 0, chapters: chapters.map((c, index) => {
+        const book = { id, url, title: page.title, keepRaw: cached ? cached.keepRaw !== false : false, selector: body.selector || '', created: cached?.created || new Date().toISOString(), bible: canReuseArchive ? cached.bible : '', bibleThrough: canReuseArchive ? cached.bibleThrough : 0, chapters: chapters.map((c, index) => {
             const previous = cached?.chapters.find(old => old.url === c.url);
-            return { ...c, index, summary: previous?.summary || '', chars: previous?.chars || previous?.text?.length || 0, ...(previous?.text ? { text: previous.text, fetched: previous.fetched, method: previous.method } : {}) };
+            return { ...c, index, archive: previous?.archive, rawRemoved: previous?.rawRemoved, summary: previous?.summary || '', chars: previous?.chars || previous?.text?.length || 0, ...(previous?.text ? { text: previous.text, fetched: previous.fetched, method: previous.method } : {}) };
         }) };
         await saveBook(book); return view(book);
     }
@@ -204,17 +244,42 @@ export async function mobileApi(route, body) {
             const c = book.chapters[body.index]; if (!c) throw new Error('章节不存在');
             if (!c.text) c.text = await loadText(book.id, c.index, c.url, c.chars > 0);
             if (!c.text) {
-                let url = c.url, text = ''; const visited = new Set();
-                for (let n = 0; n < 15 && url && !visited.has(url); n++) {
+                if (book.url.startsWith('local-text:')) throw new Error('此TXT章节原文已按精简策略移除；如需重新分析，请重新导入原文或保留原TXT备份');
+                let url = c.url, text = ''; const visited = new Set(), contentSeen = new Set();
+                for (let n = 0; n < 100 && url && !visited.has(url); n++) {
                     visited.add(url); const page = await readWeb(url, body.selector || book.selector);
-                    if (page.text.length < 250) throw new Error('未提取到足够正文，可设置正文选择器或导入TXT');
+                    if (page.text.length < 10) throw new Error(`正文分页为空，可设置正文选择器或导入TXT（${url}）`);
+                    const fingerprint = page.text.replace(/\s+/g, '');
+                    if (contentSeen.has(fingerprint)) throw new Error('网站返回重复的正文分页，未将重复/不完整章节当作建档成功；请检查正文选择器或导入TXT');
+                    contentSeen.add(fingerprint);
                     text += `${text ? '\n\n' : ''}${page.text}`; url = page.nextPage;
                     if (url && book.chapters.some(ch => ch.url === url)) url = null;
+                    if (text.length > 200000) throw new Error('单章超过20万字符，可能混入目录或循环分页，请检查正文选择器');
+                    if (url) await new Promise(resolve => setTimeout(resolve, 1000));
                 }
-                if (url && !visited.has(url)) throw new Error('本章分页超过15页，请检查网站结构');
+                if (url) throw new Error('本章分页循环或超过100页，请检查网站结构');
+                if (text.length < 250) throw new Error('整章未提取到足够正文，可设置正文选择器或导入TXT');
                 c.text = text; c.method = '酒馆内置网页接口'; c.fetched = new Date().toISOString(); await saveBook(book);
             }
             return c;
+        }
+        if (route === '/archive') {
+            const c = book.chapters[body.index]; if (!c) throw new Error('章节不存在');
+            const text = c.text || await loadText(book.id, c.index, c.url, c.chars > 0);
+            if (!text || !validArchive(body.archive) || body.archive.parts.length !== Math.ceil(text.length / 6000)) throw new Error('世界书与章节正文不匹配，未保存');
+            const parts = body.archive.parts.map((p, i) => parseArchive(JSON.stringify(p), text.slice(i * 6000, (i + 1) * 6000)));
+            c.archive = { version: 3, parts, created: new Date().toISOString() }; c.summary = chapterSummary(c.archive); c.chars = text.length;
+            book.bibleThrough = coverage(book); book.bible = outline(book);
+            const prune = book.keepRaw === false ? [c.index] : [];
+            if (prune.length) { delete c.text; c.rawRemoved = true; }
+            await saveBook(book, prune); return { archive: c.archive, summary: c.summary, bible: book.bible, bibleThrough: book.bibleThrough, rawRemoved: c.rawRemoved || false };
+        }
+        if (route === '/storage') {
+            if (typeof body.keepRaw !== 'boolean') throw new Error('存储策略无效');
+            book.keepRaw = body.keepRaw;
+            const prune = [];
+            if (!body.keepRaw && body.prune === true) for (const c of book.chapters) if (validArchive(c.archive)) { prune.push(c.index); c.chars = c.text?.length || c.chars || 0; delete c.text; c.rawRemoved = true; }
+            await saveBook(book, prune); return view(book);
         }
         if (route === '/summary') { const c = book.chapters[body.index]; if (!(c?.text || c?.chars > 0) || !body.summary?.trim()) throw new Error('不能保存缺少正文/内容的档案'); c.summary = body.summary.slice(0, 16000); }
         else if (route === '/bible') { if (!Number.isInteger(body.through) || body.through < 1 || body.through > book.chapters.length || book.chapters.slice(0, body.through).some(c => !c.summary) || !body.bible?.trim()) throw new Error('总档案覆盖范围无效'); book.bible = body.bible.slice(0, 22000); book.bibleThrough = body.through; }
@@ -244,11 +309,34 @@ export function installNetworkTools() {
 export function setupMobilePanel() {
     installNetworkTools();
     const panel = document.getElementById('novel-workshop-mobile-panel');
+    const diagnostics = document.createElement('div'); diagnostics.className = 'nmw-row';
+    diagnostics.innerHTML = '<button id="nmw-catalog-preview" class="menu_button">预览 / 刷新目录</button><button id="nmw-reader-check" class="menu_button">测试前2章正文（不调用模型）</button>';
+    panel.querySelector('#nmw-library').parentElement.before(diagnostics);
     const box = document.createElement('div'); box.className = 'nmw-network';
     box.innerHTML = `<hr><strong>给当前角色联网</strong><p>工具调用需模型支持；不支持时可手动读取。仅支持公开页面，不继承小说网站登录状态。兼容模式采用非流式回复。</p><div class="nmw-row"><button id="nmw-tools" class="menu_button">启用工具（非流式）</button><button id="nmw-web" class="menu_button">读取上方网址交给模型</button></div><label>导入TXT正文（网页受限时使用）<input id="nmw-file" type="file" accept=".txt,text/plain"></label><div class="nmw-row"><button id="nmw-card" class="menu_button">下载配套角色卡JSON</button><button id="nmw-diagnose" class="menu_button">检查兼容性</button></div>`;
     panel.append(box);
     const status = text => panel.querySelector('#nmw-status').textContent = text;
     const guard = fn => async () => { try { await fn(); } catch (e) { status(e.message); toastr.error(e.message, '手机联网扩展'); } };
+    let checking = false;
+    const inspect = async (readChapters) => {
+        if (checking || globalThis.NovelWorkshopMobile?.isBusy()) throw new Error('正在读取，请等待当前任务完成');
+        checking = true; const button = panel.querySelector(readChapters ? '#nmw-reader-check' : '#nmw-catalog-preview'); button.disabled = true;
+        const result = { status: 'running', url: panel.querySelector('#nmw-url').value.trim() }; globalThis.MobileWebNetwork.lastReaderCheck = result;
+        try {
+            status('正在解析目录并检查章节链接……');
+            const book = await mobileApi('/discover', { url: result.url, selector: panel.querySelector('#nmw-selector').value.trim(), refresh: true });
+            result.bookId = book.id; result.count = book.chapters.length; result.chapters = [];
+            if (readChapters) for (let i = 0; i < Math.min(2, book.chapters.length); i++) {
+                status(`目录识别${book.chapters.length}章，正在测试正文${i + 1}/2……`);
+                const ch = await mobileApi('/chapter', { id: book.id, index: i }); result.chapters.push({ index: i, url: ch.url, chars: ch.text.length });
+            }
+            result.status = 'done';
+            status(`目录检查通过：共${result.count}章${readChapters ? '；前' + result.chapters.length + '章正文读取正常（' + result.chapters.map(c => c.chars + '字符').join('、') + '）' : ''}。未调用模型、未开始续写。现在可点击读取/继续建档。`);
+        } catch (e) { result.status = 'error'; result.error = e.message; throw e; }
+        finally { checking = false; button.disabled = false; }
+    };
+    panel.querySelector('#nmw-catalog-preview').onclick = guard(() => inspect(false));
+    panel.querySelector('#nmw-reader-check').onclick = guard(() => inspect(true));
     panel.querySelector('#nmw-tools').onclick = guard(async () => {
         const s = context().chatCompletionSettings; if (!s) throw new Error('请先配置聊天补全API');
         s.function_calling = true;
