@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 // Browser-only: uses the existing SillyTavern /api/search/visit route. No custom server plugin.
-import { parseArchive, validArchive, chapterSummary, coverage, outline } from './worldbook.js';
+import { parseArchive, validArchive, chapterSummary, coverage, availableThrough, outline } from './worldbook.js';
 const context = () => globalThis.SillyTavern.getContext();
 const MAX_BYTES = 6 * 1024 * 1024;
 const clean = value => String(value ?? '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -232,7 +232,7 @@ export async function mobileApi(route, body) {
         const canReuseArchive = cached?.chapters.length === chapters.length && chapters.every((c, index) => cached.chapters[index]?.url === c.url);
         const book = { id, url, title: page.title, keepRaw: cached ? cached.keepRaw !== false : false, selector: body.selector || '', created: cached?.created || new Date().toISOString(), bible: canReuseArchive ? cached.bible : '', bibleThrough: canReuseArchive ? cached.bibleThrough : 0, chapters: chapters.map((c, index) => {
             const previous = cached?.chapters.find(old => old.url === c.url);
-            return { ...c, index, archive: previous?.archive, rawRemoved: previous?.rawRemoved, summary: previous?.summary || '', chars: previous?.chars || previous?.text?.length || 0, ...(previous?.text ? { text: previous.text, fetched: previous.fetched, method: previous.method } : {}) };
+            return { ...c, index, archive: previous?.archive, archiveWarnings: previous?.archiveWarnings, lastError: previous?.lastError, rawRemoved: previous?.rawRemoved, summary: previous?.summary || '', chars: previous?.chars || previous?.text?.length || 0, ...(previous?.text ? { text: previous.text, fetched: previous.fetched, method: previous.method } : {}) };
         }) };
         await saveBook(book); return view(book);
     }
@@ -267,18 +267,21 @@ export async function mobileApi(route, body) {
             const c = book.chapters[body.index]; if (!c) throw new Error('章节不存在');
             const text = c.text || await loadText(book.id, c.index, c.url, c.chars > 0);
             if (!text || !validArchive(body.archive) || body.archive.parts.length !== Math.ceil(text.length / 6000)) throw new Error('世界书与章节正文不匹配，未保存');
-            const parts = body.archive.parts.map((p, i) => parseArchive(JSON.stringify(p), text.slice(i * 6000, (i + 1) * 6000)));
-            c.archive = { version: 3, parts, created: new Date().toISOString() }; c.summary = chapterSummary(c.archive); c.chars = text.length;
-            book.bibleThrough = coverage(book); book.bible = outline(book);
-            const prune = book.keepRaw === false ? [c.index] : [];
+            const warnings = [];
+            const parts = body.archive.parts.map((p, i) => { const parsed = parseArchive(JSON.stringify(p), text.slice(i * 6000, (i + 1) * 6000), true, body.archive.version); warnings.push(...(p.warnings || []).filter(s => typeof s === 'string').map(s => s.slice(0, 100))); return { entries: parsed.entries }; });
+            c.archive = { version: body.archive.version, parts, created: new Date().toISOString() }; c.summary = chapterSummary(c.archive); c.chars = text.length; c.lastError = ''; c.archiveWarnings = [...new Set(warnings)].slice(0, 10);
+            book.bibleThrough = availableThrough(book); book.bible = outline(book);
+            const prune = book.keepRaw === false && !warnings.length ? [c.index] : [];
             if (prune.length) { delete c.text; c.rawRemoved = true; }
-            await saveBook(book, prune); return { archive: c.archive, summary: c.summary, bible: book.bible, bibleThrough: book.bibleThrough, rawRemoved: c.rawRemoved || false };
+            else c.rawRemoved = false;
+            await saveBook(book, prune); return { archive: c.archive, warnings: c.archiveWarnings, summary: c.summary, bible: book.bible, bibleThrough: book.bibleThrough, rawRemoved: c.rawRemoved || false };
         }
+        if (route === '/chapter-error') { const c = book.chapters[body.index]; if (!c) throw new Error('章节不存在'); c.lastError = String(body.error || '本章待处理').slice(0, 300); await saveBook(book); return { ok: true }; }
         if (route === '/storage') {
             if (typeof body.keepRaw !== 'boolean') throw new Error('存储策略无效');
             book.keepRaw = body.keepRaw;
             const prune = [];
-            if (!body.keepRaw && body.prune === true) for (const c of book.chapters) if (validArchive(c.archive)) { prune.push(c.index); c.chars = c.text?.length || c.chars || 0; delete c.text; c.rawRemoved = true; }
+            if (!body.keepRaw && body.prune === true) for (const c of book.chapters) if (validArchive(c.archive) && !c.archiveWarnings?.length && !c.lastError) { prune.push(c.index); c.chars = c.text?.length || c.chars || 0; delete c.text; c.rawRemoved = true; }
             await saveBook(book, prune); return view(book);
         }
         if (route === '/summary') { const c = book.chapters[body.index]; if (!(c?.text || c?.chars > 0) || !body.summary?.trim()) throw new Error('不能保存缺少正文/内容的档案'); c.summary = body.summary.slice(0, 16000); }
